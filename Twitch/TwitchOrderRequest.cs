@@ -77,7 +77,8 @@ namespace SysBot.ACNHOrders.Twitch
                     Client.SendMessage(Channel, message);
                     break;
                 case TwitchMessageDestination.Whisper:
-                    Client.SendWhisper(Trader, message);
+                    // Whispers are deprecated by Twitch, sending to channel instead
+                    Client.SendMessage(Channel, $"@{Trader} {message}");
                     break;
             }
         }

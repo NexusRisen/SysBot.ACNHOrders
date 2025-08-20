@@ -31,17 +31,7 @@ namespace SysBot.ACNHOrders.Twitch
 
             var credentials = new ConnectionCredentials(settings.Username.ToLower(), settings.Token);
 
-            var clientOptions = new ClientOptions
-            {
-                MessagesAllowedInPeriod = settings.ThrottleMessages,
-                ThrottlingPeriod = TimeSpan.FromSeconds(settings.ThrottleSeconds),
-
-                WhispersAllowedInPeriod = settings.ThrottleWhispers,
-                WhisperThrottlingPeriod = TimeSpan.FromSeconds(settings.ThrottleWhispersSeconds),
-
-                // message queue capacity is managed (10_000 for message & whisper separately)
-                // message send interval is managed (50ms for each message sent)
-            };
+            var clientOptions = new ClientOptions();
 
             var lowerKeyDic = new Dictionary<string, string>();
             foreach (var kvp in settings.UserDefinitedCommands)
@@ -72,10 +62,6 @@ namespace SysBot.ACNHOrders.Twitch
             client.OnWhisperSent += (_, e)
                 => LogUtil.LogText($"[{client.TwitchUsername}] - Whisper Sent to @{e.Receiver}: {e.Message}");
 
-            client.OnMessageThrottled += (_, e)
-                => LogUtil.LogError($"Message Throttled: {e.Message}", "TwitchBot");
-            client.OnWhisperThrottled += (_, e)
-                => LogUtil.LogError($"Whisper Throttled: {e.Message}", "TwitchBot");
 
             client.OnError += (_, e) =>
                 LogUtil.LogError(e.Exception.Message + Environment.NewLine + e.Exception.StackTrace, "TwitchBot");
@@ -138,13 +124,14 @@ namespace SysBot.ACNHOrders.Twitch
             if (response.Length == 0)
                 return;
 
+            var channel = e.Command.ChatMessage.Channel;
             if (dest == TwitchMessageDestination.Whisper)
             {
-                client.SendWhisper(msg.Username, response);
+                // Whispers are deprecated by Twitch, sending to channel instead
+                client.SendMessage(channel, $"@{msg.Username} {response}");
             }
             else
             {
-                var channel = e.Command.ChatMessage.Channel;
                 client.SendMessage(channel, response);
             }
         }
@@ -161,7 +148,8 @@ namespace SysBot.ACNHOrders.Twitch
             if (response.Length == 0)
                 return;
 
-            client.SendWhisper(msg.Username, response);
+            // Whispers are deprecated by Twitch - functionality disabled
+            // If needed, users should use channel commands instead
         }
 
         private string HandleCommand(TwitchLibMessage m, string c, string args, bool whisper, out TwitchMessageDestination dest)

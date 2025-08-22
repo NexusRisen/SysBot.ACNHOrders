@@ -19,6 +19,9 @@ namespace SysBot.ACNHOrders
         private static int MaxOrderCount => Globals.Bot.Config.OrderConfig.MaxQueueCount;
         private static Dictionary<ulong, DateTime> UserLastCommand = new();
         private static object commandSync = new();
+        private static DateTime LastCleanup = DateTime.UtcNow;
+        private static readonly TimeSpan CleanupInterval = TimeSpan.FromHours(1);
+        private static readonly TimeSpan CommandExpiry = TimeSpan.FromHours(24);
 
         private const string OrderItemSummary =
             "Requests the bot add the item order to the queue with the user's provided input. " +
@@ -427,29 +430,6 @@ namespace SysBot.ACNHOrders
                 await ReplyAsync($"{identity} is not a valid u64.").ConfigureAwait(false);
         }
 
-        [Command("removeAlt")]
-        [Alias("removeLog", "rmAlt")]
-        [Summary("Removes an identity (name-id) from the local user-to-villager AntiAbuse database")]
-        [RequireSudo]
-        public async Task RemoveAltAsync([Remainder]string identity)
-        {
-            if (NewAntiAbuse.Instance.Remove(identity))
-                await ReplyAsync($"{identity} has been removed from the database.").ConfigureAwait(false);
-            else
-                await ReplyAsync($"{identity} is not a valid identity.").ConfigureAwait(false);
-        }
-
-        [Command("removeAltLegacy")]
-        [Alias("removeLogLegacy", "rmAltLegacy")]
-        [Summary("(Uses legacy database) Removes an identity (name-id) from the local user-to-villager AntiAbuse database")]
-        [RequireSudo]
-        public async Task RemoveLegacyAltAsync([Remainder] string identity)
-        {
-            if (LegacyAntiAbuse.CurrentInstance.Remove(identity))
-                await ReplyAsync($"{identity} has been removed from the database.").ConfigureAwait(false);
-            else
-                await ReplyAsync($"{identity} is not a valid identity.").ConfigureAwait(false);
-        }
 
         [Command("visitorList")]
         [Alias("visitors")]
@@ -530,9 +510,9 @@ namespace SysBot.ACNHOrders
 
         private async Task AttemptToQueueRequest(IReadOnlyCollection<Item> items, SocketUser orderer, ISocketMessageChannel msgChannel, VillagerRequest? vr, bool catalogue = false)
         {
-            if (!Globals.Bot.Config.AllowKnownAbusers && LegacyAntiAbuse.CurrentInstance.IsGlobalBanned(orderer.Id))
+            if (!CanCommand(orderer.Id, Globals.Bot.Config.OrderConfig.UserCooldown, true))
             {
-                await ReplyAsync($"{Context.User.Mention} - You are not permitted to use this bot.");
+                await ReplyAsync($"{Context.User.Mention} - You have been rate limited. Please try again later.");
                 return;
             }
 
@@ -542,11 +522,6 @@ namespace SysBot.ACNHOrders
                 return;
             }
 
-            if (GlobalBan.IsBanned(orderer.Id.ToString()))
-            {
-                await ReplyAsync($"{Context.User.Mention} - You have been banned for abuse. Order has not been accepted.");
-                return;
-            }
 
             var currentOrderCount = Globals.Hub.Orders.Count;
             if (currentOrderCount >= MaxOrderCount)
@@ -580,6 +555,7 @@ namespace SysBot.ACNHOrders
                 return true;
             lock (commandSync)
             {
+                CleanupExpiredCommands();
                 if (UserLastCommand.ContainsKey(id))
                 {
                     bool inCooldownPeriod = Math.Abs((DateTime.Now - UserLastCommand[id]).TotalSeconds) < secondsCooldown;
@@ -595,6 +571,22 @@ namespace SysBot.ACNHOrders
                     UserLastCommand.Add(id, DateTime.Now);
                 }
                 return true;
+            }
+        }
+
+        private static void CleanupExpiredCommands()
+        {
+            var now = DateTime.UtcNow;
+            if (now - LastCleanup < CleanupInterval)
+                return;
+
+            LastCleanup = now;
+            var cutoff = now - CommandExpiry;
+            var expired = UserLastCommand.Where(kvp => kvp.Value < cutoff).Select(kvp => kvp.Key).ToList();
+            
+            foreach (var key in expired)
+            {
+                UserLastCommand.Remove(key);
             }
         }
     }

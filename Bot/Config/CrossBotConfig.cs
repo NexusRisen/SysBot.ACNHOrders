@@ -115,9 +115,6 @@ namespace SysBot.ACNHOrders
         /// <summary> NHL file to be used on bot startup </summary>
         public string FieldLayerName { get; set; } = "name";
 
-        /// <summary> Should we allow known hackers/abusers from using the order bot? (community-built list) </summary>
-        public bool AllowKnownAbusers { get; set; } = false;
-
         /// <summary> Should we press up once before starting the game? Not guaranteed to avoid the update, but the bot will try its best. </summary>
         public bool AvoidSystemUpdate { get; set; } = true;
 

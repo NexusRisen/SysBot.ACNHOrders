@@ -68,14 +68,6 @@ namespace SysBot.ACNHOrders
                 return;
             if (!Globals.Bot.Config.DodoModeConfig.LimitedDodoRestoreOnlyMode)
                 return;
-            //Check ban list to send dodo code.
-            string[] Checklist = File.ReadAllLines("banlist.txt", Encoding.UTF8);
-            int indexS = Array.FindIndex(Checklist, row => row.Contains(Context.User.Id.ToString()));
-            if (indexS != -1)
-            {
-                await ReplyAsync($"{Context.User.Mention} - You are currently not allowed to use the bot. Dodo code will not be sent.");
-                return;
-            }
             try
             {
                 if (cfg.FieldLayerName != "name")

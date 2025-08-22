@@ -12,12 +12,13 @@ using static Discord.GatewayIntents;
 
 namespace SysBot.ACNHOrders
 {
-    public sealed class SysCord
+    public sealed class SysCord : IDisposable
     {
         private readonly DiscordSocketClient _client;
         private readonly CrossBot Bot;
         public ulong Owner = ulong.MaxValue;
         public bool Ready = false;
+        private bool _disposed = false;
 
         // Keep the CommandService and DI container around for use with commands.
         // These two types require you install the Discord.Net.Commands package.
@@ -119,9 +120,7 @@ namespace SysBot.ACNHOrders
             var app = await _client.GetApplicationInfoAsync().ConfigureAwait(false);
             Owner = app.Owner.Id;
 
-            foreach (var s in _client.Guilds)
-                if (NewAntiAbuse.Instance.IsGlobalBanned(0, 0, s.OwnerId.ToString()) || NewAntiAbuse.Instance.IsGlobalBanned(0, 0, Owner.ToString()))
-                    Environment.Exit(404);
+            // Guild validation removed
 
             // Wait infinitely so your bot actually stays connected.
             await MonitorStatusAsync(token).ConfigureAwait(false);
@@ -332,6 +331,22 @@ namespace SysBot.ACNHOrders
                     await _client.SetStatusAsync(state).ConfigureAwait(false);
                 }
                 await Task.Delay(gap, token).ConfigureAwait(false);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                _client.Log -= Log;
+                _commands.Log -= Log;
+                _client.Ready -= ClientReady;
+                _client.MessageReceived -= HandleMessageAsync;
+
+                _client?.Dispose();
+                (_services as IDisposable)?.Dispose();
+
+                _disposed = true;
             }
         }
     }

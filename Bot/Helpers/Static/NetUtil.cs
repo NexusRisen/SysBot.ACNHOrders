@@ -52,18 +52,15 @@ namespace SysBot.ACNHOrders
 
         public static async Task DownloadFileAsync(string url, string destinationFilePath)
         {
-            using (HttpClient httpClient = new HttpClient())
+            using (HttpResponseMessage response = await httpClient.GetAsync(url))
             {
-                using (HttpResponseMessage response = await httpClient.GetAsync(url))
-                {
-                    response.EnsureSuccessStatusCode();
+                response.EnsureSuccessStatusCode();
 
-                    using (Stream contentStream = await response.Content.ReadAsStreamAsync())
+                using (Stream contentStream = await response.Content.ReadAsStreamAsync())
+                {
+                    using (FileStream fileStream = new FileStream(destinationFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
                     {
-                        using (FileStream fileStream = new FileStream(destinationFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
-                        {
-                            await contentStream.CopyToAsync(fileStream);
-                        }
+                        await contentStream.CopyToAsync(fileStream);
                     }
                 }
             }

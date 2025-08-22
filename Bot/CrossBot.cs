@@ -1,46 +1,65 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using ACNHMobileSpawner;
 using NHSE.Core;
 using NHSE.Villagers;
-using ACNHMobileSpawner;
 using SysBot.Base;
-using System.Text;
-using System.IO;
-using System.Collections.Generic;
 
 namespace SysBot.ACNHOrders
 {
     public sealed class CrossBot : SwitchRoutineExecutor<CrossBotConfig>
     {
+        #region Constants
+
+        private const int DODO_RETRY_COUNT = 10;
+        private const int ARRIVAL_ANIMATION_DELAY = 10_000;
+        private const int WARNING_THRESHOLD_SECONDS = 60;
+        private const int TELEPORT_DELAY = 500;
+        private const int ANCHOR_TIMEOUT_MS = 60_000;
+
+        #endregion
+
+        #region Properties and Fields
+
         private ConcurrentQueue<IACNHOrderNotifier<Item>> Orders => QueueHub.CurrentInstance.Orders;
         private uint InventoryOffset { get; set; } = (uint)OffsetHelper.InventoryOffset;
 
+        // Request Queues
         public readonly ConcurrentQueue<ItemRequest> Injections = new();
         public readonly ConcurrentQueue<SpeakRequest> Speaks = new();
         public readonly ConcurrentQueue<VillagerRequest> VillagerInjections = new();
         public readonly ConcurrentQueue<MapOverrideRequest> MapOverrides = new();
         public readonly ConcurrentQueue<TurnipRequest> StonkRequests = new();
+
+        // Helper Services
         public readonly PocketInjectorAsync PocketInjector;
         public readonly DodoPositionHelper DodoPosition;
         public readonly AnchorHelper Anchors;
         public readonly VisitorListHelper VisitorList;
-        public readonly DummyOrder<Item> DummyRequest = new();
+        public readonly ExternalMapHelper ExternalMap;
+        public readonly DropBotState State;
+        public readonly DodoDraw? DodoImageDrawer;
         public readonly ISwitchConnectionAsync SwitchConnection;
         public readonly ConcurrentBag<IDodoRestoreNotifier> DodoNotifiers = new();
+        public readonly DummyOrder<Item> DummyRequest = new();
 
-        public readonly ExternalMapHelper ExternalMap;
-
-        public readonly DropBotState State;
-
-        public readonly DodoDraw? DodoImageDrawer;
-
+        // Game State
         public MapTerrainLite Map { get; private set; } = new MapTerrainLite(new byte[MapGrid.MapTileCount32x32 * Item.SIZE]);
         public TimeBlock LastTimeState { get; private set; } = new();
+        public VillagerHelper Villagers { get; private set; } = VillagerHelper.Empty;
+
+        // Bot State
         public bool CleanRequested { private get; set; }
         public bool RestoreRestartRequested { private get; set; }
+        public bool GameIsDirty { get; set; } = true;
+
+        // Current Session Info
         public string DodoCode { get; set; } = "No code set yet.";
         public string VisitorInfo { get; set; } = "No visitor info yet.";
         public string TownName { get; set; } = "No town name yet.";
@@ -48,14 +67,19 @@ namespace SysBot.ACNHOrders
         public string DisUserID { get; set; } = string.Empty;
         public string LastArrival { get; private set; } = string.Empty;
         public string LastArrivalIsland { get; private set; } = string.Empty;
-        public ulong CurrentUserId { get; set; } = default!;
         public string CurrentUserName { get; set; } = string.Empty;
-        public bool GameIsDirty { get; set; } = true; // Dirty if crashed or last user didn't arrive/leave correctly
+
+        // IDs and Addresses
+        public ulong CurrentUserId { get; set; } = default!;
         public ulong ChatAddress { get; set; } = 0;
+
+        // Status
         public int ChargePercent { get; set; } = 100;
         public DateTime LastDodoFetchTime { get; private set; } = DateTime.Now;
 
-        public VillagerHelper Villagers { get; private set; } = VillagerHelper.Empty;
+        #endregion
+
+        #region Constructor
 
         public CrossBot(CrossBotConfig cfg) : base(cfg)
         {
@@ -79,6 +103,10 @@ namespace SysBot.ACNHOrders
             var fileName = File.Exists(Config.DodoModeConfig.LoadedNHLFilename) ? File.ReadAllText(Config.DodoModeConfig.LoadedNHLFilename) + ".nhl" : string.Empty;
             ExternalMap = new ExternalMapHelper(cfg, fileName);
         }
+
+        #endregion
+
+        #region Main Loop and Control
 
         public override void SoftStop() => Config.AcceptingCommands = false;
 
@@ -298,19 +326,17 @@ namespace SysBot.ACNHOrders
 
                         var nid = await Connection.ReadBytesAsync((uint)OffsetHelper.ArriverNID, 8, token).ConfigureAwait(false);
                         var islandId = await Connection.ReadBytesAsync((uint)OffsetHelper.ArriverVillageId, 4, token).ConfigureAwait(false);
-                        bool IsSafeNewAbuse = true;
                         try
                         {
                             var newnid = BitConverter.ToUInt64(nid, 0);
                             var newnislid = BitConverter.ToUInt32(islandId, 0);
                             var plaintext = $"Treasure island arrival";
-                            IsSafeNewAbuse = NewAntiAbuse.Instance.LogUser(newnislid, newnid, string.Empty, plaintext);
                             LogUtil.LogInfo($"Arrival logged: NID={newnid} TownID={newnislid} Order details={plaintext}", Config.IP);
-
-                            if (!IsSafeNewAbuse)
-                                LogUtil.LogInfo((Globals.Bot.Config.OrderConfig.PingOnAbuseDetection ? $"Pinging <@{Globals.Self.Owner}>: " : string.Empty) + $"{LastArrival} (NID: {newnid}) is in the known abuser list. It is likely this user is abusing your treasure island.", Globals.Bot.Config.IP);
                         }
-                        catch { }
+                        catch (Exception e)
+                        {
+                            LogUtil.LogError($"Error logging arrival: {e.Message}", Config.IP);
+                        }
 
                         await Task.Delay(60_000, token).ConfigureAwait(false);
 
@@ -482,8 +508,7 @@ namespace SysBot.ACNHOrders
                 GameIsDirty = true;
             }
 
-            if (result == OrderResult.NoArrival || result == OrderResult.NoLeave)
-                GlobalBan.Penalize(order.UserGuid.ToString());
+            // Order completed, no additional action needed
 
             // Clear username of last arrival
             await Connection.WriteBytesAsync(new byte[0x14], (uint)OffsetHelper.ArriverNameLocAddress, token).ConfigureAwait(false);
@@ -680,16 +705,42 @@ namespace SysBot.ACNHOrders
 
         private async Task<OrderResult> FetchDodoAndAwaitOrder(IACNHOrderNotifier<Item> order, bool ignoreInjection, CancellationToken token)
         {
+            var dodoResult = await FetchDodoCode(ignoreInjection, token).ConfigureAwait(false);
+            if (dodoResult != OrderResult.Success)
+            {
+                order.OrderCancelled(this, "A connection error occurred: Failed to obtain a Dodo code. Sorry, your request has been removed.", true);
+                return dodoResult;
+            }
+
+            await SetupIslandForVisitor(order, ignoreInjection, token).ConfigureAwait(false);
+
+            if (ignoreInjection)
+                return OrderResult.Success;
+
+            var arrivalResult = await WaitForVisitorArrival(order, token).ConfigureAwait(false);
+            if (arrivalResult != OrderResult.Success)
+                return arrivalResult;
+
+            return await HandleVisitorSession(order, token).ConfigureAwait(false);
+        }
+
+        #endregion
+
+        #region Visitor Management Helper Methods
+
+        private async Task<OrderResult> FetchDodoCode(bool ignoreInjection, CancellationToken token)
+        {
             LogUtil.LogInfo($"Talking to Orville. Attempting to get Dodo code for {TownName}.", Config.IP);
             if (ignoreInjection)
                 await SetScreenCheck(true, token).ConfigureAwait(false);
+            
             await DodoPosition.GetDodoCode((uint)OffsetHelper.DodoAddress, false, token).ConfigureAwait(false);
 
             // try again if we failed to get a dodo
             if (Config.OrderConfig.RetryFetchDodoOnFail && !DodoPosition.IsDodoValid(DodoPosition.DodoCode))
             {
                 LogUtil.LogInfo($"Failed to get a valid Dodo code for {TownName}. Trying again...", Config.IP);
-                for (int i = 0; i < 10; ++i)
+                for (int i = 0; i < DODO_RETRY_COUNT; ++i)
                     await ClickConversation(SwitchButton.B, 0_600, token).ConfigureAwait(false);
                 await DodoPosition.GetDodoCode((uint)OffsetHelper.DodoAddress, true, token).ConfigureAwait(false);
             }
@@ -698,15 +749,17 @@ namespace SysBot.ACNHOrders
 
             if (!DodoPosition.IsDodoValid(DodoPosition.DodoCode))
             {
-                var error = "Failed to connect to the internet and obtain a Dodo code.";
-                LogUtil.LogError($"{error} Trying next request.", Config.IP);
-                order.OrderCancelled(this, $"A connection error occured: {error} Sorry, your request has been removed.", true);
+                LogUtil.LogError("Failed to connect to the internet and obtain a Dodo code. Trying next request.", Config.IP);
                 return OrderResult.Faulted;
             }
 
             DodoCode = DodoPosition.DodoCode;
             LastDodoFetchTime = DateTime.Now;
+            return OrderResult.Success;
+        }
 
+        private async Task SetupIslandForVisitor(IACNHOrderNotifier<Item> order, bool ignoreInjection, CancellationToken token)
+        {
             if (!ignoreInjection)
                 order.OrderReady(this, $"You have {(int)(Config.OrderConfig.WaitForArriverTime * 0.9f)} seconds to arrive. My island name is **{TownName}**", DodoCode);
 
@@ -715,7 +768,7 @@ namespace SysBot.ACNHOrders
 
             // Teleport to airport leave zone (twice, in case we get pulled back)
             await SendAnchorBytes(4, token).ConfigureAwait(false);
-            await Task.Delay(0_500, token).ConfigureAwait(false);
+            await Task.Delay(TELEPORT_DELAY, token).ConfigureAwait(false);
             await SendAnchorBytes(4, token).ConfigureAwait(false);
 
             // Walk out
@@ -724,6 +777,16 @@ namespace SysBot.ACNHOrders
             await Task.Delay(1_000, token).ConfigureAwait(false);
             await SetStick(SwitchStick.LEFT, 0, 0, 1_500, token).ConfigureAwait(false);
 
+            await WaitForOverworldState(token).ConfigureAwait(false);
+
+            // Teleport to drop zone (twice, in case we get pulled back)
+            await SendAnchorBytes(1, token).ConfigureAwait(false);
+            await Task.Delay(TELEPORT_DELAY, token).ConfigureAwait(false);
+            await SendAnchorBytes(1, token).ConfigureAwait(false);
+        }
+
+        private async Task WaitForOverworldState(CancellationToken token)
+        {
             while (await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false) != OverworldState.Overworld)
                 await Task.Delay(1_000, token).ConfigureAwait(false);
 
@@ -732,18 +795,13 @@ namespace SysBot.ACNHOrders
 
             while (await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false) != OverworldState.Overworld)
                 await Task.Delay(1_000, token).ConfigureAwait(false);
+        }
 
-            // Teleport to drop zone (twice, in case we get pulled back)
-            await SendAnchorBytes(1, token).ConfigureAwait(false);
-            await Task.Delay(0_500, token).ConfigureAwait(false);
-            await SendAnchorBytes(1, token).ConfigureAwait(false);
-
-            if (ignoreInjection)
-                return OrderResult.Success;
-
-            LogUtil.LogInfo($"Waiting for arrival.", Config.IP);
+        private async Task<OrderResult> WaitForVisitorArrival(IACNHOrderNotifier<Item> order, CancellationToken token)
+        {
+            LogUtil.LogInfo("Waiting for arrival.", Config.IP);
             var startTime = DateTime.Now;
-            // Wait for arrival
+            
             while (!await IsArriverNew(token).ConfigureAwait(false))
             {
                 await Task.Delay(1_000, token).ConfigureAwait(false);
@@ -755,49 +813,30 @@ namespace SysBot.ACNHOrders
                     return OrderResult.NoArrival;
                 }
             }
+            return OrderResult.Success;
+        }
 
-            var nid = await Connection.ReadBytesAsync((uint)OffsetHelper.ArriverNID, 8, token).ConfigureAwait(false);
-            var islandId = await Connection.ReadBytesAsync((uint)OffsetHelper.ArriverVillageId, 4, token).ConfigureAwait(false);
 
-            bool IsSafeNewAbuse = true;
-            try
-            {
-                var newnid = BitConverter.ToUInt64(nid, 0);
-                var newnislid = BitConverter.ToUInt32(islandId, 0);
-                var plaintext = $"Name and ID: {order.VillagerName}-{order.UserGuid}, Villager name and town: {LastArrival}-{LastArrivalIsland}";
-                IsSafeNewAbuse = NewAntiAbuse.Instance.LogUser(newnislid, newnid, order.UserGuid.ToString(), plaintext);
-                LogUtil.LogInfo($"Arrival logged: NID={newnid} TownID={newnislid} Order details={plaintext}", Config.IP);
-            }
-            catch(Exception e) 
-            {
-                LogUtil.LogInfo(e.Message + "\r\n" + e.StackTrace, Config.IP);
-            }
-
-            // Check the user against known abusers
-            var IsSafe = LegacyAntiAbuse.CurrentInstance.LogUser(LastArrival, LastArrivalIsland, $"{order.VillagerName}-{order.UserGuid}") && IsSafeNewAbuse;
-            if (!IsSafe)
-            {
-                if (!Config.AllowKnownAbusers)
-                {
-                    LogUtil.LogInfo($"{LastArrival} from {LastArrivalIsland} is a known abuser. Starting next order...", Config.IP);
-                    order.OrderCancelled(this, $"You are a known abuser. You cannot use this bot.", false);
-                    return OrderResult.NoArrival;
-                }
-                else
-                {
-                    LogUtil.LogInfo($"{LastArrival} from {LastArrivalIsland} is a known abuser, but you are allowing them to use your bot at your own risk.", Config.IP);
-                }
-            }
-
+        private async Task<OrderResult> HandleVisitorSession(IACNHOrderNotifier<Item> order, CancellationToken token)
+        {
             order.SendNotification(this, $"Visitor arriving: {LastArrival}. Your items will be in front of you once you land.");
             if (order.VillagerName != string.Empty && Config.OrderConfig.EchoArrivingLeavingChannels.Count > 0)
                 await AttemptEchoHook($"> Visitor arriving: {order.VillagerName}", Config.OrderConfig.EchoArrivingLeavingChannels, token).ConfigureAwait(false);
 
-            // Wait for arrival animation (flight board, arrival through gate, terrible dodo seaplane joke, etc)
-            await Task.Delay(10_000, token).ConfigureAwait(false);
+            // Wait for arrival animation
+            await Task.Delay(ARRIVAL_ANIMATION_DELAY, token).ConfigureAwait(false);
 
+            await WaitForVisitorLanding(token).ConfigureAwait(false);
+            CurrentUserId = order.UserGuid;
+
+            return await MonitorVisitorSession(order, token).ConfigureAwait(false);
+        }
+
+        private async Task WaitForVisitorLanding(CancellationToken token)
+        {
             OverworldState state = OverworldState.Unknown;
             bool isUserArriveLeaving = false;
+
             // Ensure we're on overworld before starting timer/drop loop
             while (state != OverworldState.Overworld)
             {
@@ -822,25 +861,27 @@ namespace SysBot.ACNHOrders
             }
 
             await UpdateBlocker(false, token).ConfigureAwait(false);
+        }
 
-            // Update current user Id such that they may use drop commands
-            CurrentUserId = order.UserGuid;
-
-            // We check if the user has left by checking whether or not someone hits the Arrive/Leaving state
-            startTime = DateTime.Now;
+        private async Task<OrderResult> MonitorVisitorSession(IACNHOrderNotifier<Item> order, CancellationToken token)
+        {
+            var startTime = DateTime.Now;
             bool warned = false;
+
             while (await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false) != OverworldState.UserArriveLeaving)
             {
                 await DropLoop(token).ConfigureAwait(false);
                 await Click(SwitchButton.B, 0_300, token).ConfigureAwait(false);
                 await Task.Delay(1_000, token).ConfigureAwait(false);
-                if (Math.Abs((DateTime.Now - startTime).TotalSeconds) > (Config.OrderConfig.UserTimeAllowed - 60) && !warned)
+
+                var elapsedSeconds = Math.Abs((DateTime.Now - startTime).TotalSeconds);
+                if (elapsedSeconds > (Config.OrderConfig.UserTimeAllowed - WARNING_THRESHOLD_SECONDS) && !warned)
                 {
                     order.SendNotification(this, "You have 60 seconds remaining before I start the next order. Please ensure you can collect your items and leave within that time.");
                     warned = true;
                 }
 
-                if (Math.Abs((DateTime.Now - startTime).TotalSeconds) > Config.OrderConfig.UserTimeAllowed)
+                if (elapsedSeconds > Config.OrderConfig.UserTimeAllowed)
                 {
                     var error = "Visitor failed to leave.";
                     LogUtil.LogError($"{error}. Removed from queue, moving to next order.", Config.IP);
@@ -857,12 +898,17 @@ namespace SysBot.ACNHOrders
                 }
             }
 
-            LogUtil.LogInfo($"Order completed. Notifying visitor of completion.", Config.IP);
+            return await CompleteVisitorSession(order, token).ConfigureAwait(false);
+        }
+
+        private async Task<OrderResult> CompleteVisitorSession(IACNHOrderNotifier<Item> order, CancellationToken token)
+        {
+            LogUtil.LogInfo("Order completed. Notifying visitor of completion.", Config.IP);
             await UpdateBlocker(true, token).ConfigureAwait(false);
             order.OrderFinished(this, Config.OrderConfig.CompleteOrderMessage);
             if (order.VillagerName != string.Empty && Config.OrderConfig.EchoArrivingLeavingChannels.Count > 0)
                 await AttemptEchoHook($"> Visitor completed order, and is now leaving: {order.VillagerName}", Config.OrderConfig.EchoArrivingLeavingChannels, token).ConfigureAwait(false);
-            
+
             await Task.Delay(5_000, token).ConfigureAwait(false);
             await UpdateBlocker(false, token).ConfigureAwait(false);
             await Task.Delay(15_000, token).ConfigureAwait(false);
@@ -878,6 +924,10 @@ namespace SysBot.ACNHOrders
             await Task.Delay(1_200, token).ConfigureAwait(false);
             return OrderResult.Success;
         }
+
+        #endregion
+
+        #region Game Control Methods
 
         private async Task RestartGame(CancellationToken token)
         {
@@ -1365,6 +1415,8 @@ namespace SysBot.ACNHOrders
             foreach (var n in DodoNotifiers)
                 n.NotifyServerOfState(st);
         }
+
+        #endregion
         
     }
 }

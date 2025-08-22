@@ -213,11 +213,6 @@ namespace SysBot.ACNHOrders.Twitch
                 return false;
             }
 
-            if (GlobalBan.IsBanned(id.ToString()))
-            {
-                msg = "You have been banned for abuse. Order has not been accepted.";
-                return false;
-            }
 
             msg = string.Empty;
             return true;

@@ -24,7 +24,7 @@ namespace SysBot.ACNHOrders
         private static readonly TimeSpan CommandExpiry = TimeSpan.FromHours(24);
 
         private const string OrderItemSummary =
-            "Requests the bot add the item order to the queue with the user's provided input. " +
+            "Requests the bot add the item order to the queue with the user's provided input. Items will be expanded to fill 40 spawn slots for efficient delivery. " +
             "Hex Mode: Item IDs (in hex); request multiple by putting spaces between items. " +
             "Text Mode: Item names; request multiple by putting commas between items. To parse for another language, include the language code first and a comma, followed by the items.";
 
@@ -117,6 +117,9 @@ namespace SysBot.ACNHOrders
 
             if (items == null)
                 items = string.IsNullOrWhiteSpace(request) ? new Item[1] { new Item(Item.NONE) } : ItemParser.GetItemsFromUserInput(request, cfg.DropConfig, ItemDestination.FieldItemDropped).ToArray();
+
+            // Expand items to fill up to 40 slots for more efficient spawning
+            items = ExpandItemsToFortySlots(items);
 
             await AttemptToQueueRequest(items, Context.User, Context.Channel, vr).ConfigureAwait(false);
         }
@@ -233,6 +236,9 @@ namespace SysBot.ACNHOrders
 
                 if (items == null)
                     items = string.IsNullOrWhiteSpace(request) ? new Item[1] { new Item(Item.NONE) } : ItemParser.GetItemsFromUserInput(request, cfg.DropConfig, ItemDestination.FieldItemDropped).ToArray();
+
+                // Expand items to fill up to 40 slots for more efficient spawning
+                items = ExpandItemsToFortySlots(items);
 
                 await AttemptToQueueRequest(items, Context.User, Context.Channel, vr).ConfigureAwait(false);
             }
@@ -508,6 +514,43 @@ namespace SysBot.ACNHOrders
             return;
         }
 
+        private static Item[] ExpandItemsToFortySlots(Item[] originalItems)
+        {
+            const int LockedSlots = 40;
+            
+            // If user provided 40 or more items, return exactly the first 40
+            if (originalItems.Length >= LockedSlots)
+                return originalItems.Take(LockedSlots).ToArray();
+                
+            // If no valid items provided, return original
+            if (originalItems.Length == 0 || (originalItems.Length == 1 && originalItems[0].ItemId == Item.NONE))
+                return originalItems;
+                
+            var expandedItems = new List<Item>(LockedSlots); // Pre-allocate capacity
+            
+            // Calculate how many times to repeat each item to fill exactly 40 slots
+            int slotsPerItem = LockedSlots / originalItems.Length;
+            int remainingSlots = LockedSlots % originalItems.Length;
+            
+            // Add items in a round-robin fashion to create an even distribution
+            for (int i = 0; i < slotsPerItem; i++)
+            {
+                expandedItems.AddRange(originalItems);
+            }
+            
+            // Fill remaining slots by cycling through the original items
+            for (int i = 0; i < remainingSlots; i++)
+            {
+                expandedItems.Add(originalItems[i % originalItems.Length]);
+            }
+            
+            // Final safety check: ensure we never exceed 40 items
+            if (expandedItems.Count > LockedSlots)
+                return expandedItems.Take(LockedSlots).ToArray();
+            
+            return expandedItems.ToArray();
+        }
+
         private async Task AttemptToQueueRequest(IReadOnlyCollection<Item> items, SocketUser orderer, ISocketMessageChannel msgChannel, VillagerRequest? vr, bool catalogue = false)
         {
             if (!CanCommand(orderer.Id, Globals.Bot.Config.OrderConfig.UserCooldown, true))
@@ -537,11 +580,13 @@ namespace SysBot.ACNHOrders
                 return;
             }
 
-            if (items.Count > MultiItem.MaxOrder)
+            // Ensure items are locked to exactly 40, no more, no less (unless it's a catalogue order)
+            const int MaxItemsLocked = 40;
+            if (items.Count > MaxItemsLocked)
             {
-                var clamped = $"Users are limited to {MultiItem.MaxOrder} items per command, You've asked for {items.Count}. All items above the limit have been removed.";
+                var clamped = $"Items are locked to exactly {MaxItemsLocked} per order. You've requested {items.Count}, limiting to {MaxItemsLocked}.";
                 await ReplyAsync(clamped).ConfigureAwait(false);
-                items = items.Take(40).ToArray();
+                items = items.Take(MaxItemsLocked).ToArray();
             }
 
             var multiOrder = new MultiItem(items.ToArray(), catalogue, true, true);
